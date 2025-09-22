@@ -1,0 +1,131 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import random
+
+# Инициализация MediaPipe Hands
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+# Константы для расчета расстояния
+KNOWN_PALM_WIDTH = 8.5  # Средняя ширина ладони взрослого человека в см
+REFERENCE_DISTANCE = 50  # Расстояние при калибровке (в см)
+REFERENCE_PALM_WIDTH = 100  # Ширина ладони в пикселях на REFERENCE_DISTANCE
+
+class Finger3DSquareTracker:
+    def __init__(self):
+        self.hands = mp_hands.Hands(
+            static_image_mode=False,
+            max_num_hands=1,
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.7)
+
+        # Расчет фокусного расстояния камеры
+        self.focal_length = (REFERENCE_PALM_WIDTH * REFERENCE_DISTANCE) / KNOWN_PALM_WIDTH
+        self.base_size = 50  # Базовый размер квадрата на REFERENCE_DISTANCE
+
+    def get_palm_width(self, landmarks, image_shape):
+        h, w = image_shape[:2]
+        thumb_base = landmarks.landmark[2]
+        pinky_base = landmarks.landmark[17]
+        thumb_x, thumb_y = thumb_base.x * w, thumb_base.y * h
+        pinky_x, pinky_y = pinky_base.x * w, pinky_base.y * h
+        return np.sqrt((pinky_x - thumb_x) ** 2 + (pinky_y - thumb_y) ** 2)
+
+    def calculate_distance(self, palm_width_pixels):
+        if palm_width_pixels == 0:
+            return 0
+        return (KNOWN_PALM_WIDTH * self.focal_length) / palm_width_pixels
+
+    def draw_perspective_square(self, image, fingertip_pos, distance):
+        """Рисует 3D квадрат с учетом перспективы и положения на экране"""
+        if fingertip_pos is None or distance == 0:
+            return image
+
+        x, y = fingertip_pos
+        h, w = image.shape[:2]
+
+        scale = REFERENCE_DISTANCE / distance
+        size = int(self.base_size * scale)
+
+        # Определяем смещение перспективы в зависимости от положения на экране
+        screen_center = w // 2
+        perspective_factor = (x - screen_center) / screen_center  # -1..1
+
+        # Координаты квадрата с перспективой
+        front_left = (x - size // 4, 600)
+        front_right = (x + size // 4, 600)
+
+        # Задние точки с учетом перспективы
+        back_offset = int(size * 0.3 * abs(perspective_factor))
+        if perspective_factor < 0:  # Если справа от центра
+            back_left = (x - size // 2 - back_offset, 600 + size//2)
+            back_right = (x + size // 2 - back_offset // 2, 600 + size//2)
+        else:  # Если слева от центра
+            back_left = (x - size // 2 + back_offset // 2, 600 + size//2)
+            back_right = (x + size // 2 + back_offset, 600 + size//2)
+
+        # Рисуем переднюю грань
+        cv2.line(image, front_left, front_right, (0, 255, 0), 2)
+
+        # Рисуем боковые грани
+        cv2.line(image, front_left, back_left, (0, 200, 0), 1)
+        cv2.line(image, front_right, back_right, (0, 200, 0), 1)
+
+        # Рисуем заднюю грань
+        cv2.line(image, back_left, back_right, (0, 150, 0), 2)
+
+        cv2.line(image, back_left, (600, 720), (255, 0, 0), 2)
+        cv2.line(image, back_right, (680, 720), (255, 0, 0), 2)
+
+        return image
+
+    def process_frame(self, image):
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        results = self.hands.process(image_rgb)
+
+        output_image = image.copy()
+        distance = 0
+        fingertip_pos = None
+
+        if results.multi_hand_landmarks and results.multi_handedness[0].classification[0].label == "Right":
+            for hand_landmarks in results.multi_hand_landmarks:
+                mp_drawing.draw_landmarks(
+                    output_image, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+                palm_width = self.get_palm_width(hand_landmarks, image.shape)
+                distance = self.calculate_distance(palm_width)
+
+                fingertip = hand_landmarks.landmark[8]
+                h, w = image.shape[:2]
+                fingertip_pos = (int(fingertip.x * w), int(fingertip.y * h))
+                cv2.circle(output_image, fingertip_pos, 8, (0, 0, 255), -1)
+                output_image = self.draw_perspective_square(output_image, fingertip_pos, distance)
+
+                cv2.putText(output_image, f"Distance: {distance:.1f} cm",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.8, (0, 255, 0), 2)
+
+        return output_image
+
+
+def main():
+    tracker = Finger3DSquareTracker()
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    while cap.isOpened():
+        success, frame = cap.read()
+        if not success:
+            continue
+        frame = cv2.flip(frame, 1)
+
+        output_frame = tracker.process_frame(frame)
+        cv2.imshow('Square Tracking', output_frame)
+
+        if cv2.waitKey(5) == 27:
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()
